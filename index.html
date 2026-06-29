@@ -442,17 +442,11 @@
 
 <script>
 // ═══════════════════════════════════════════════════════
-//  STATE
+//  STATE  (in-memory only — no localStorage)
 // ═══════════════════════════════════════════════════════
-const SERVER_KEY   = 'ms_server_url';
-const APP_KEY      = 'ms_app';
-const SELLERS_KEY  = 'ms_sellers';
-const BUYERS_KEY   = 'ms_buyers';
-const SIGS_KEY     = 'ms_signatures';
+let serverUrl = '';
 
-let serverUrl = localStorage.getItem(SERVER_KEY) || '';
-
-let app = JSON.parse(localStorage.getItem(APP_KEY) || 'null') || {
+let app = {
   pricePerGallon: 4.50, taxPercent: 0.0,
   adminPin: '1234',
   myEmail: 'you@gmail.com', treasuryEmail: '',
@@ -460,32 +454,25 @@ let app = JSON.parse(localStorage.getItem(APP_KEY) || 'null') || {
   invoiceCounter: 1
 };
 
-let sellers   = JSON.parse(localStorage.getItem(SELLERS_KEY) || '[]');
-let buyers    = JSON.parse(localStorage.getItem(BUYERS_KEY)  || '[]');
-let signatures= JSON.parse(localStorage.getItem(SIGS_KEY)    || '{}'); // {buyerName: [sigs]}
+let sellers    = [];
+let buyers     = [];
+let signatures = {}; // {buyerName: [sigs]}
 
-let selSeller = '';
-let selBuyer  = null;
+let selSeller   = '';
+let selBuyer    = null;
 let saleGallons = 0;
-let syncing   = false;
+let syncing     = false;
 
 // For admin edit
 let curEditField = null;
 let curEditType  = 'text';
 
 // PIN
-let pinBuf = '';
+let pinBuf    = '';
 let pinTarget = 'scr-admin';
 
-// ═══════════════════════════════════════════════════════
-//  PERSISTENCE
-// ═══════════════════════════════════════════════════════
-function saveAll() {
-  localStorage.setItem(APP_KEY, JSON.stringify(app));
-  localStorage.setItem(SELLERS_KEY, JSON.stringify(sellers));
-  localStorage.setItem(BUYERS_KEY,  JSON.stringify(buyers));
-  localStorage.setItem(SIGS_KEY,    JSON.stringify(signatures));
-}
+// saveAll is a no-op — all persistence is Google Sheets
+function saveAll() {}
 
 // ═══════════════════════════════════════════════════════
 //  SCREEN NAV
@@ -550,47 +537,26 @@ async function apiPost(body) {
 
 async function syncNow() {
   if (syncing) return;
+  if (!serverUrl) { toast('No server URL set', 'error'); return; }
   setSyncing(true);
   try {
-    // Fetch sellers
+    // Sellers — Sheets is authoritative
     const sr = await apiPost({ action: 'getSellers' });
-    if (sr?.success && sr.sellers) {
-      // Merge: add any server sellers we don't have locally
-      for (const s of sr.sellers) {
-        if (!sellers.includes(s)) sellers.push(s);
-      }
-      // Push local sellers to server
-      for (const s of sellers) {
-        if (!sr.sellers.includes(s)) {
-          await apiPost({ action: 'addSeller', name: s });
-        }
-      }
-    }
+    if (sr?.success && sr.sellers) sellers = sr.sellers;
 
-    // Fetch buyers (Sheets is authoritative)
+    // Buyers — Sheets is authoritative
     const br = await apiPost({ action: 'getBuyers' });
-    if (br?.success && br.buyers) {
-      buyers = br.buyers; // Sheets is source of truth
-    }
+    if (br?.success && br.buyers) buyers = br.buyers;
 
-    // Sync sigs for all buyers
+    // Signatures — Sheets is authoritative
+    signatures = {};
     for (const b of buyers) {
       const sigsR = await apiPost({ action: 'getSignatures', buyer: b.name });
       if (sigsR?.success && sigsR.signatures) {
-        const local = signatures[b.name] || [];
-        // Push local sigs not on server
-        for (const sig of local) {
-          if (!sigsR.signatures.includes(sig)) {
-            await apiPost({ action: 'addSignature', buyer: b.name, signature: sig });
-          }
-        }
-        // Merge server sigs locally
-        const merged = [...new Set([...local, ...sigsR.signatures])];
-        signatures[b.name] = merged;
+        signatures[b.name] = sigsR.signatures;
       }
     }
 
-    saveAll();
     rebuildSaleUI();
     toast('Synced with Sheets ✓');
   } catch(e) {
@@ -653,17 +619,19 @@ function updatePreview() {
 function fmt2(n) { return n.toFixed(2); }
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
 
-function deleteSeller() {
+async function deleteSeller() {
   const dd = document.getElementById('dd-seller');
   const name = dd.value;
   if (!name) return;
   if (!confirm(`Delete seller "${name}"?`)) return;
-  sellers = sellers.filter(s => s !== name);
-  saveAll();
-  rebuildSaleUI();
-  // Background push
-  apiPost({ action: 'deleteSeller', name }).catch(() => {});
-  toast(`Seller "${name}" removed`);
+  const r = await apiPost({ action: 'deleteSeller', name });
+  if (r?.success) {
+    sellers = sellers.filter(s => s !== name);
+    rebuildSaleUI();
+    toast(`Seller "${name}" removed`);
+  } else {
+    toast('Failed to delete seller', 'error');
+  }
 }
 
 function deleteSig() {
@@ -672,11 +640,14 @@ function deleteSig() {
   const buyerName = selBuyer !== null && buyers[selBuyer] ? buyers[selBuyer].name : null;
   if (!sig || !buyerName) return;
   if (!confirm(`Delete signature "${sig}"?`)) return;
-  signatures[buyerName] = (signatures[buyerName] || []).filter(s => s !== sig);
-  saveAll();
-  rebuildSigDD();
-  apiPost({ action: 'deleteSignature', buyer: buyerName, signature: sig }).catch(() => {});
-  toast('Signature removed');
+  const r = await apiPost({ action: 'deleteSignature', buyer: buyerName, signature: sig });
+  if (r?.success) {
+    signatures[buyerName] = (signatures[buyerName] || []).filter(s => s !== sig);
+    rebuildSigDD();
+    toast('Signature removed');
+  } else {
+    toast('Failed to delete signature', 'error');
+  }
 }
 
 function openNewSigModal() {
@@ -689,14 +660,16 @@ async function saveNewSig() {
   if (!val) return;
   const buyerName = selBuyer !== null && buyers[selBuyer] ? buyers[selBuyer].name : null;
   if (!buyerName) { toast('Select a buyer first', 'error'); return; }
-  if (!signatures[buyerName]) signatures[buyerName] = [];
-  if (!signatures[buyerName].includes(val)) signatures[buyerName].push(val);
-  saveAll();
-  rebuildSigDD();
-  closeModal('modal-sig');
-  toast('Signature added');
-  // Background push
-  apiPost({ action: 'addSignature', buyer: buyerName, signature: val }).catch(() => {});
+  const r = await apiPost({ action: 'addSignature', buyer: buyerName, signature: val });
+  if (r?.success) {
+    if (!signatures[buyerName]) signatures[buyerName] = [];
+    if (!signatures[buyerName].includes(val)) signatures[buyerName].push(val);
+    rebuildSigDD();
+    closeModal('modal-sig');
+    toast('Signature added');
+  } else {
+    toast('Failed to add signature', 'error');
+  }
 }
 
 function goToConfirm() {
@@ -765,7 +738,6 @@ async function sendSale() {
       // Only fall back to local counter if the sheet has no invoices yet.
       if (serverLast > 0) {
         app.invoiceCounter = serverNext;
-        saveAll();
       }
     }
   } catch(e) {
@@ -799,17 +771,12 @@ async function sendSale() {
       if (m) usedNum = parseInt(m[1], 10);
     }
     app.invoiceCounter = usedNum + 1;
-    saveAll();
     toast(`Invoice #${String(usedNum).padStart(5,'0')} sent! Total: $${fmt2(total)}`);
     document.getElementById('ta-gallons').value = '';
     saleGallons = 0;
     showScreen('scr-sale');
   } else {
-    // Save offline for retry — keep current counter for when reconnected
-    const pending = JSON.parse(localStorage.getItem('ms_pending') || '[]');
-    pending.push(payload);
-    localStorage.setItem('ms_pending', JSON.stringify(pending));
-    toast('No connection — saved offline for retry', 'error');
+    toast('Send failed — check connection and try again', 'error');
     showScreen('scr-confirm');
   }
 }
@@ -875,7 +842,6 @@ function saveEditField() {
   } else {
     app[curEditField] = val;
   }
-  saveAll();
   closeModal('modal-edit');
   rebuildAdminUI();
   toast('Saved');
@@ -885,22 +851,29 @@ async function addSeller() {
   const name = document.getElementById('new-seller-name').value.trim();
   if (!name) { toast('Enter a name', 'error'); return; }
   if (sellers.includes(name)) { toast('Seller already exists', 'error'); return; }
-  sellers.push(name);
-  saveAll();
-  document.getElementById('new-seller-name').value = '';
-  rebuildAdminUI();
-  toast(`Seller "${name}" added`);
+  setSyncing(true);
   const r = await apiPost({ action: 'addSeller', name });
-  if (!r?.success) toast('Saved locally — sync when online', 'error');
+  setSyncing(false);
+  if (r?.success) {
+    sellers.push(name);
+    document.getElementById('new-seller-name').value = '';
+    rebuildAdminUI();
+    toast(`Seller "${name}" added`);
+  } else {
+    toast('Failed to add seller — check connection', 'error');
+  }
 }
 
-function adminDeleteSeller(name) {
+async function adminDeleteSeller(name) {
   if (!confirm(`Remove seller "${name}"?`)) return;
-  sellers = sellers.filter(s => s !== name);
-  saveAll();
-  rebuildAdminUI();
-  apiPost({ action: 'deleteSeller', name }).catch(() => {});
-  toast(`Seller "${name}" removed`);
+  const r = await apiPost({ action: 'deleteSeller', name });
+  if (r?.success) {
+    sellers = sellers.filter(s => s !== name);
+    rebuildAdminUI();
+    toast(`Seller "${name}" removed`);
+  } else {
+    toast('Failed to delete seller', 'error');
+  }
 }
 
 async function addBuyer() {
@@ -908,23 +881,18 @@ async function addBuyer() {
   const email = document.getElementById('new-buyer-email').value.trim();
   if (!name) { toast('Enter a buyer name', 'error'); return; }
   if (buyers.find(b => b.name === name)) { toast('Buyer already exists', 'error'); return; }
-
-  // Add locally
-  buyers.push({ name, email });
-  saveAll();
-  document.getElementById('new-buyer-name').value = '';
-  document.getElementById('new-buyer-email').value = '';
-  rebuildAdminUI();
-  rebuildSaleUI();
-
-  // Sync to Sheets
   setSyncing(true);
   const r = await apiPost({ action: 'addBuyer', name, email });
   setSyncing(false);
   if (r?.success) {
-    toast(`Buyer "${name}" added & synced to Sheets ✓`);
+    buyers.push({ name, email });
+    document.getElementById('new-buyer-name').value = '';
+    document.getElementById('new-buyer-email').value = '';
+    rebuildAdminUI();
+    rebuildSaleUI();
+    toast(`Buyer "${name}" added ✓`);
   } else {
-    toast(`Buyer saved locally — will sync when online`, 'error');
+    toast('Failed to add buyer — check connection', 'error');
   }
 }
 
@@ -932,13 +900,16 @@ async function adminDeleteBuyer(idx) {
   const b = buyers[idx];
   if (!b) return;
   if (!confirm(`Remove buyer "${b.name}"? This will also delete their signatures.`)) return;
-  buyers.splice(idx, 1);
-  delete signatures[b.name];
-  saveAll();
-  rebuildAdminUI();
-  rebuildSaleUI();
   const r = await apiPost({ action: 'deleteBuyer', name: b.name });
-  toast(r?.success ? `"${b.name}" removed from Sheets` : `Removed locally — sync when online`);
+  if (r?.success) {
+    buyers.splice(idx, 1);
+    delete signatures[b.name];
+    rebuildAdminUI();
+    rebuildSaleUI();
+    toast(`"${b.name}" removed`);
+  } else {
+    toast('Failed to delete buyer — check connection', 'error');
+  }
 }
 
 // ═══════════════════════════════════════════════════════
@@ -985,7 +956,6 @@ async function saveServerUrl() {
   const url = document.getElementById('server-url').value.trim();
   if (!url) { toast('Enter a URL', 'error'); return; }
   serverUrl = url;
-  localStorage.setItem(SERVER_KEY, url);
   const status = document.getElementById('conn-status');
   status.textContent = 'Testing connection…';
   status.className = 'text-sm';
@@ -1001,23 +971,7 @@ async function saveServerUrl() {
   }
 }
 
-// ═══════════════════════════════════════════════════════
-//  PENDING OFFLINE SYNC
-// ═══════════════════════════════════════════════════════
-async function retryPending() {
-  const pending = JSON.parse(localStorage.getItem('ms_pending') || '[]');
-  if (!pending.length) return;
-  const remaining = [];
-  for (const payload of pending) {
-    const r = await apiPost(payload);
-    if (!r?.success) remaining.push(payload);
-  }
-  localStorage.setItem('ms_pending', JSON.stringify(remaining));
-  if (remaining.length < pending.length) {
-    const sent = pending.length - remaining.length;
-    toast(`${sent} offline invoice(s) synced ✓`);
-  }
-}
+
 
 // ═══════════════════════════════════════════════════════
 //  INIT
@@ -1027,7 +981,6 @@ rebuildSaleUI();
 
 // On load: try to sync & retry pending
 window.addEventListener('load', async () => {
-  await retryPending();
   await syncNow();
 });
 
