@@ -761,7 +761,9 @@ async function sendSale() {
         if (m) serverLast = parseInt(m[1], 10);
       }
       const serverNext = serverLast + 1;
-      if (serverNext > app.invoiceCounter) {
+      // Always trust the server — it's the source of truth.
+      // Only fall back to local counter if the sheet has no invoices yet.
+      if (serverLast > 0) {
         app.invoiceCounter = serverNext;
         saveAll();
       }
