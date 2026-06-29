@@ -450,7 +450,7 @@ const SELLERS_KEY  = 'ms_sellers';
 const BUYERS_KEY   = 'ms_buyers';
 const SIGS_KEY     = 'ms_signatures';
 
-let serverUrl = localStorage.getItem(SERVER_KEY) || 'https://milksales.waldnertim82.workers.dev';
+let serverUrl = localStorage.getItem(SERVER_KEY) || '';
 
 let app = JSON.parse(localStorage.getItem(APP_KEY) || 'null') || {
   pricePerGallon: 4.50, taxPercent: 0.0,
