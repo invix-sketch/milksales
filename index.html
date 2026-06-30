@@ -407,7 +407,36 @@ let selSeller='',selBuyer=null,saleGallons=0,syncing=false;
 let curEditField=null,curEditType='text';
 let pinBuf='';
 
-function saveAll(){}
+const LS_KEY='milkSalesAdminSettings';
+function saveAll(){
+  try{
+    localStorage.setItem(LS_KEY,JSON.stringify({
+      pricePerGallon:app.pricePerGallon,
+      taxPercent:app.taxPercent,
+      adminPin:app.adminPin,
+      myEmail:app.myEmail,
+      treasuryEmail:app.treasuryEmail,
+      businessName:app.businessName,
+      businessAddress:app.businessAddress,
+      serverUrl:serverUrl
+    }));
+  }catch(e){console.warn('Local settings save failed:',e)}
+}
+function loadAll(){
+  try{
+    const raw=localStorage.getItem(LS_KEY);
+    if(!raw)return;
+    const s=JSON.parse(raw);
+    if(typeof s.pricePerGallon==='number')app.pricePerGallon=s.pricePerGallon;
+    if(typeof s.taxPercent==='number')app.taxPercent=s.taxPercent;
+    if(typeof s.adminPin==='string')app.adminPin=s.adminPin;
+    if(typeof s.myEmail==='string')app.myEmail=s.myEmail;
+    if(typeof s.treasuryEmail==='string')app.treasuryEmail=s.treasuryEmail;
+    if(typeof s.businessName==='string')app.businessName=s.businessName;
+    if(typeof s.businessAddress==='string')app.businessAddress=s.businessAddress;
+    if(typeof s.serverUrl==='string')serverUrl=s.serverUrl;
+  }catch(e){console.warn('Local settings load failed:',e)}
+}
 
 function showScreen(id){
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
@@ -571,6 +600,7 @@ function saveEditField(){
   if(curEditField==='adminPin'&&val.length!==4){toast('PIN must be 4 digits','error');return}
   if(['pricePerGallon','taxPercent'].includes(curEditField))app[curEditField]=parseFloat(val)||0;
   else app[curEditField]=val;
+  saveAll();
   closeModal('modal-edit');rebuildAdminUI();toast('Saved');
 }
 async function addSeller(){
@@ -624,6 +654,7 @@ async function saveServerUrl(){
   const url=document.getElementById('server-url').value.trim();
   if(!url){toast('Enter a URL','error');return}
   serverUrl=url;
+  saveAll();
   const status=document.getElementById('conn-status');
   status.textContent='Testing connection…';status.className='text-sm';
   const r=await apiPost({action:'getSellers'});
@@ -631,6 +662,7 @@ async function saveServerUrl(){
   else{status.textContent='✗ Could not reach server';status.className='text-sm';status.style.color='var(--danger)';toast('Saved — but server did not respond','error')}
 }
 
+loadAll();
 buildPinGrid();rebuildSaleUI();
 window.addEventListener('load',async()=>{await syncNow()});
 document.querySelectorAll('.modal-overlay').forEach(o=>{
